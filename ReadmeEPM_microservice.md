@@ -54,63 +54,184 @@ type EPMLog struct {
 ### Step 2: AWS S3 Repository
 
 ```go
-// internal/repository/s3_repository.go
+// // internal/repository/s3_repository.go
+// package repository
+
+// import (
+//     "bytes"
+//     "context"
+//     "fmt"
+//     "github.com/aws/aws-sdk-go/aws"
+//     "github.com/aws/aws-sdk-go/aws/session"
+//     "github.com/aws/aws-sdk-go/service/s3"
+//     "io/ioutil"
+//     "log"
+// )
+
+// type S3Repository interface {
+//     UploadPolicy(ctx context.Context, bucket string, key string, data []byte) error
+//     GetPolicy(ctx context.Context, bucket string, key string) ([]byte, error)
+//     UploadAudit(ctx context.Context, bucket string, key string, data []byte) error
+//     GetAudit(ctx context.Context, bucket string, key string) ([]byte, error)
+// }
+
+// type S3Repo struct {
+//     s3Client *s3.S3
+// }
+
+// func NewS3Repo() *S3Repo {
+//     sess := session.Must(session.NewSession())
+//     s3Client := s3.New(sess)
+//     return &S3Repo{s3Client: s3Client}
+// }
+
+// func (r *S3Repo) UploadPolicy(ctx context.Context, bucket string, key string, data []byte) error {
+//     _, err := r.s3Client.PutObjectWithContext(ctx, &s3.PutObjectInput{
+//         Bucket: aws.String(bucket),
+//         Key:    aws.String(key),
+//         Body:   bytes.NewReader(data),
+//     })
+//     return err
+// }
+
+// func (r *S3Repo) GetPolicy(ctx context.Context, bucket string, key string) ([]byte, error) {
+//     result, err := r.s3Client.GetObjectWithContext(ctx, &s3.GetObjectInput{
+//         Bucket: aws.String(bucket),
+//         Key:    aws.String(key),
+//     })
+//     if err != nil {
+//         return nil, err
+//     }
+//     return ioutil.ReadAll(result.Body)
+// }
+
+// func (r *S3Repo) UploadAudit(ctx context.Context, bucket string, key string, data []byte) error {
+//     return r.UploadPolicy(ctx, bucket, key, data) // Same logic for audit
+// }
+
+// func (r *S3Repo) GetAudit(ctx context.Context, bucket string, key string) ([]byte, error) {
+//     return r.GetPolicy(ctx, bucket, key)
+// }
+// ```
+
+// internal/repository/dynamodb_repository.go
 package repository
 
 import (
-    "bytes"
     "context"
+    "encoding/json"
     "fmt"
     "github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"
-    "github.com/aws/aws-sdk-go/service/s3"
-    "io/ioutil"
+    "github.com/aws/aws-sdk-go/service/dynamodb"
+    "github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
     "log"
+    "user-microservice/internal/models"
 )
 
-type S3Repository interface {
-    UploadPolicy(ctx context.Context, bucket string, key string, data []byte) error
-    GetPolicy(ctx context.Context, bucket string, key string) ([]byte, error)
-    UploadAudit(ctx context.Context, bucket string, key string, data []byte) error
-    GetAudit(ctx context.Context, bucket string, key string) ([]byte, error)
+type DynamoDBRepository interface {
+    SavePolicy(ctx context.Context, tableName string, policy models.EPMPolicy) error
+    GetPolicy(ctx context.Context, tableName, policyID string) (*models.EPMPolicy, error)
+    SaveAudit(ctx context.Context, tableName string, audit models.EPMAudit) error
+    GetAudit(ctx context.Context, tableName, auditID string) (*models.EPMAudit, error)
 }
 
-type S3Repo struct {
-    s3Client *s3.S3
+type DynamoDBRepo struct {
+    dynamoClient *dynamodb.DynamoDB
 }
 
-func NewS3Repo() *S3Repo {
+func NewDynamoDBRepo() *DynamoDBRepo {
     sess := session.Must(session.NewSession())
-    s3Client := s3.New(sess)
-    return &S3Repo{s3Client: s3Client}
+    dynamoClient := dynamodb.New(sess)
+    return &DynamoDBRepo{dynamoClient: dynamoClient}
 }
 
-func (r *S3Repo) UploadPolicy(ctx context.Context, bucket string, key string, data []byte) error {
-    _, err := r.s3Client.PutObjectWithContext(ctx, &s3.PutObjectInput{
-        Bucket: aws.String(bucket),
-        Key:    aws.String(key),
-        Body:   bytes.NewReader(data),
-    })
-    return err
-}
-
-func (r *S3Repo) GetPolicy(ctx context.Context, bucket string, key string) ([]byte, error) {
-    result, err := r.s3Client.GetObjectWithContext(ctx, &s3.GetObjectInput{
-        Bucket: aws.String(bucket),
-        Key:    aws.String(key),
-    })
+func (r *DynamoDBRepo) SavePolicy(ctx context.Context, tableName string, policy models.EPMPolicy) error {
+    item, err := dynamodbattribute.MarshalMap(policy)
     if err != nil {
-        return nil, err
+        return fmt.Errorf("failed to marshal policy: %w", err)
     }
-    return ioutil.ReadAll(result.Body)
+
+    input := &dynamodb.PutItemInput{
+        TableName: aws.String(tableName),
+        Item:      item,
+    }
+
+    _, err = r.dynamoClient.PutItemWithContext(ctx, input)
+    if err != nil {
+        return fmt.Errorf("failed to save policy to DynamoDB: %w", err)
+    }
+    return nil
 }
 
-func (r *S3Repo) UploadAudit(ctx context.Context, bucket string, key string, data []byte) error {
-    return r.UploadPolicy(ctx, bucket, key, data) // Same logic for audit
+func (r *DynamoDBRepo) GetPolicy(ctx context.Context, tableName, policyID string) (*models.EPMPolicy, error) {
+    input := &dynamodb.GetItemInput{
+        TableName: aws.String(tableName),
+        Key: map[string]*dynamodb.AttributeValue{
+            "id": {S: aws.String(policyID)},
+        },
+    }
+
+    result, err := r.dynamoClient.GetItemWithContext(ctx, input)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get policy from DynamoDB: %w", err)
+    }
+
+    if result.Item == nil {
+        return nil, fmt.Errorf("policy with ID %s not found", policyID)
+    }
+
+    var policy models.EPMPolicy
+    err = dynamodbattribute.UnmarshalMap(result.Item, &policy)
+    if err != nil {
+        return nil, fmt.Errorf("failed to unmarshal policy: %w", err)
+    }
+
+    return &policy, nil
 }
 
-func (r *S3Repo) GetAudit(ctx context.Context, bucket string, key string) ([]byte, error) {
-    return r.GetPolicy(ctx, bucket, key)
+func (r *DynamoDBRepo) SaveAudit(ctx context.Context, tableName string, audit models.EPMAudit) error {
+    item, err := dynamodbattribute.MarshalMap(audit)
+    if err != nil {
+        return fmt.Errorf("failed to marshal audit: %w", err)
+    }
+
+    input := &dynamodb.PutItemInput{
+        TableName: aws.String(tableName),
+        Item:      item,
+    }
+
+    _, err = r.dynamoClient.PutItemWithContext(ctx, input)
+    if err != nil {
+        return fmt.Errorf("failed to save audit to DynamoDB: %w", err)
+    }
+    return nil
+}
+
+func (r *DynamoDBRepo) GetAudit(ctx context.Context, tableName, auditID string) (*models.EPMAudit, error) {
+    input := &dynamodb.GetItemInput{
+        TableName: aws.String(tableName),
+        Key: map[string]*dynamodb.AttributeValue{
+            "id": {S: aws.String(auditID)},
+        },
+    }
+
+    result, err := r.dynamoClient.GetItemWithContext(ctx, input)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get audit from DynamoDB: %w", err)
+    }
+
+    if result.Item == nil {
+        return nil, fmt.Errorf("audit with ID %s not found", auditID)
+    }
+
+    var audit models.EPMAudit
+    err = dynamodbattribute.UnmarshalMap(result.Item, &audit)
+    if err != nil {
+        return nil, fmt.Errorf("failed to unmarshal audit: %w", err)
+    }
+
+    return &audit, nil
 }
 ```
 
@@ -154,6 +275,7 @@ func (p *KafkaProducer) PublishEvent(key, value string) error {
 ### Step 4: Service Layer
 
 ```go
+
 // internal/service/epm_service.go
 package service
 
@@ -167,45 +289,28 @@ import (
 )
 
 type EPMService struct {
-    repo  repository.S3Repository
+    repo  repository.DynamoDBRepository
     kafka *kafka.KafkaProducer
 }
 
-func NewEPMService(repo repository.S3Repository, kafka *kafka.KafkaProducer) *EPMService {
+func NewEPMService(repo repository.DynamoDBRepository, kafka *kafka.KafkaProducer) *EPMService {
     return &EPMService{repo: repo, kafka: kafka}
 }
 
-func (s *EPMService) CreatePolicy(ctx context.Context, bucket, key string, policy models.EPMPolicy) error {
-    data, err := json.Marshal(policy)
-    if err != nil {
-        return err
-    }
-
-    err = s.repo.UploadPolicy(ctx, bucket, key, data)
+func (s *EPMService) CreatePolicy(ctx context.Context, tableName string, policy models.EPMPolicy) error {
+    err := s.repo.SavePolicy(ctx, tableName, policy)
     if err == nil {
         s.publishEvent("create_policy", policy)
     }
     return err
 }
 
-func (s *EPMService) GetPolicy(ctx context.Context, bucket, key string) (*models.EPMPolicy, error) {
-    data, err := s.repo.GetPolicy(ctx, bucket, key)
-    if err != nil {
-        return nil, err
-    }
-
-    var policy models.EPMPolicy
-    err = json.Unmarshal(data, &policy)
-    return &policy, err
+func (s *EPMService) GetPolicy(ctx context.Context, tableName, policyID string) (*models.EPMPolicy, error) {
+    return s.repo.GetPolicy(ctx, tableName, policyID)
 }
 
-func (s *EPMService) LogAudit(ctx context.Context, bucket, key string, audit models.EPMAudit) error {
-    data, err := json.Marshal(audit)
-    if err != nil {
-        return err
-    }
-
-    return s.repo.UploadAudit(ctx, bucket, key, data)
+func (s *EPMService) LogAudit(ctx context.Context, tableName string, audit models.EPMAudit) error {
+    return s.repo.SaveAudit(ctx, tableName, audit)
 }
 
 func (s *EPMService) publishEvent(eventType string, policy models.EPMPolicy) {
@@ -277,6 +382,36 @@ func (h *EPMHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 
 ```go
 // tests/unit/epm_service_test.go
+// package unit
+
+// import (
+//     "context"
+//     "testing"
+//     "user-microservice/internal/models"
+//     "user-microservice/internal/repository/mocks"
+//     "user-microservice/internal/service"
+//     "github.com/stretchr/testify/assert"
+//     "github.com/stretchr/testify/mock"
+// )
+
+// func TestCreatePolicy(t *testing.T) {
+//     mockRepo := new(mocks.S3Repository)
+//     mockKafka := new(mocks.KafkaProducer)
+//     svc := service.NewEPMService(mockRepo, mockKafka)
+
+//     policy := models.EPMPolicy{ID: "1", Name: "Admin", Rules: "some_rules"}
+
+//     mockRepo.On("UploadPolicy", mock.Anything, "epm-policies", policy.ID, mock.Anything).Return(nil)
+//     mockKafka.On("PublishEvent", "create_policy", mock.Anything).Return(nil)
+
+//     err := svc.CreatePolicy(context.TODO(), "epm-policies", policy.ID, policy)
+
+//     assert.NoError(t, err)
+//     mockRepo.AssertCalled(t, "UploadPolicy", mock.Anything, "epm-policies", policy.ID, mock.Anything)
+//     mockKafka.AssertCalled(t, "PublishEvent", "create_policy", mock.Anything)
+// }
+
+// tests/unit/epm_service_test.go
 package unit
 
 import (
@@ -290,19 +425,19 @@ import (
 )
 
 func TestCreatePolicy(t *testing.T) {
-    mockRepo := new(mocks.S3Repository)
+    mockRepo := new(mocks.DynamoDBRepository)
     mockKafka := new(mocks.KafkaProducer)
     svc := service.NewEPMService(mockRepo, mockKafka)
 
     policy := models.EPMPolicy{ID: "1", Name: "Admin", Rules: "some_rules"}
 
-    mockRepo.On("UploadPolicy", mock.Anything, "epm-policies", policy.ID, mock.Anything).Return(nil)
+    mockRepo.On("SavePolicy", mock.Anything, "EPMPolicies", policy).Return(nil)
     mockKafka.On("PublishEvent", "create_policy", mock.Anything).Return(nil)
 
-    err := svc.CreatePolicy(context.TODO(), "epm-policies", policy.ID, policy)
+    err := svc.CreatePolicy(context.TODO(), "EPMPolicies", policy)
 
     assert.NoError(t, err)
-    mockRepo.AssertCalled(t, "UploadPolicy", mock.Anything, "epm-policies", policy.ID, mock.Anything)
+    mockRepo.AssertCalled(t, "SavePolicy", mock.Anything, "EPMPolicies", policy)
     mockKafka.AssertCalled(t, "PublishEvent", "create_policy", mock.Anything)
 }
 ```
@@ -310,9 +445,45 @@ func TestCreatePolicy(t *testing.T) {
 ### Step 7: Integration Tests
 
 ```go
-// tests/in
+// tests/integration/epm_handler_integration_test.go
+// package integration
 
-tegration/epm_handler_integration_test.go
+// import (
+//     "bytes"
+//     "context"
+//     "encoding/json"
+//     "net/http"
+//     "net/http/httptest"
+//     "testing"
+//     "user-microservice/internal/handlers"
+//     "user-microservice/internal/models"
+//     "user-microservice/internal/repository"
+//     "user-microservice/internal/service"
+
+//     "github.com/stretchr/testify/assert"
+// )
+
+// func TestCreatePolicyIntegration(t *testing.T) {
+//     repo := repository.NewS3Repo()
+//     kafka := kafka.NewKafkaProducer([]string{"localhost:9092"})
+//     svc := service.NewEPMService(repo, kafka)
+//     handler := handlers.NewEPMHandler(svc)
+
+//     policy := models.EPMPolicy{ID: "1", Name: "Admin", Rules: "some_rules"}
+//     policyJSON, _ := json.Marshal(policy)
+
+//     req := httptest.NewRequest("POST", "/policies", bytes.NewBuffer(policyJSON))
+//     rec := httptest.NewRecorder()
+
+//     handler.CreatePolicy(rec, req)
+
+//     assert.Equal(t, http.StatusCreated, rec.Code)
+
+//     savedPolicy, _ := svc.GetPolicy(context.TODO(), "epm-policies", "1")
+//     assert.Equal(t, policy.Name, savedPolicy.Name)
+// }
+
+// tests/integration/epm_handler_integration_test.go
 package integration
 
 import (
@@ -331,7 +502,7 @@ import (
 )
 
 func TestCreatePolicyIntegration(t *testing.T) {
-    repo := repository.NewS3Repo()
+    repo := repository.NewDynamoDBRepo()
     kafka := kafka.NewKafkaProducer([]string{"localhost:9092"})
     svc := service.NewEPMService(repo, kafka)
     handler := handlers.NewEPMHandler(svc)
@@ -346,7 +517,7 @@ func TestCreatePolicyIntegration(t *testing.T) {
 
     assert.Equal(t, http.StatusCreated, rec.Code)
 
-    savedPolicy, _ := svc.GetPolicy(context.TODO(), "epm-policies", "1")
+    savedPolicy, _ := svc.GetPolicy(context.TODO(), "EPMPolicies", "1")
     assert.Equal(t, policy.Name, savedPolicy.Name)
 }
 ```
