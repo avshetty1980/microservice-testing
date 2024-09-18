@@ -76,10 +76,6 @@ func main() {
 	r.Get("/book/{isbn}", func(w http.ResponseWriter, r *http.Request) {
 
 		isbn := chi.URLParam(r, "isbn")
-		bookError := jsonError{
-			Code:    "001",
-			Message: fmt.Sprintf("no book with ISBN %s", isbn),
-		}
 
 		book := Book{}
 
@@ -93,6 +89,11 @@ func main() {
 		)
 
 		if err != nil {
+			bookError := jsonError{
+				Code:    "001",
+				Message: fmt.Sprintf("no book with ISBN %s", isbn),
+			}
+
 			body, _ := json.Marshal(bookError)
 			w.WriteHeader(http.StatusNotFound)
 			w.Write([]byte(body))
